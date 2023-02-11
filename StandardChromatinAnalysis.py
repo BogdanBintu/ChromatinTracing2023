@@ -7,15 +7,46 @@ import matplotlib.pyplot as plt
 import tifffile
 
 sys.path.append(r'C:\Users\bbintu\bbintu_jackfruit_scripts\XK_ChromatinTracing\CommonTools')
-
+sys.path.append(r'C:\Users\BintuLabUser\Scope3AnalysisScripts\ChromatinTracing2023\CommonTools')
 import AlignmentTools_py3 as at
 import Fitting_v4 as ft
 
 ### Usefull functions
+
+
+def get_fov(self,fl=None):
+    if fl is None: fl =self.fl
+    self.fov = os.path.basename(fl.replace(self.extension,'')).split('_')[-1]
+def get_xml(self,fl=None):
+    if fl is None: fl =self.fl
+    get_fov(self,fl=fl)
+    xmls = glob.glob(os.path.dirname(fl.replace(self.extension,''))+os.sep+'*.xml')
+    self.xml = [xml for xml in xmls if self.fov in os.path.basename(xml)][0]
+def get_metadata(self,fl=None,tags = ['stage_position','z_offsets','x_pixels','y_pixels']):
+    get_xml(self,fl=fl)
+    self.dic_meta = {}
+    for tag in tags:
+        lns = [ln.split('>')[1].split('<')[0] for ln in open(self.xml,'r') if tag in ln]
+        if len(lns)>0:
+            self.dic_meta[tag]=lns[0]
+    if 'stage_position' in self.dic_meta: self.dic_meta['stage_position']=eval(self.dic_meta['stage_position'])
+    if 'z_offsets' in self.dic_meta:
+        start,end,zpix,ncols=self.dic_meta['z_offsets'].split(':')
+        sizez = (float(end)-float(start))/float(zpix)
+        self.dic_meta['ncols'] = int(ncols)
+        self.dic_meta['shape'] = [int(sizez),int(self.dic_meta['x_pixels']),int(self.dic_meta['y_pixels'])]
+        self.shape = self.dic_meta['shape']
+        self.ncol = self.dic_meta['ncols']
+def get_xmlS(fl,extension):
+    fov = os.path.basename(fl.replace(extension,'')).split('_')[-1]
+    xmls = glob.glob(os.path.dirname(fl.replace(extension,''))+os.sep+'*.xml')
+    xml = [xml for xml in xmls if fov in os.path.basename(xml)][0]
+    return xml
 def get_zpix_size(file_sig,extension):
+    xml = get_xmlS(file_sig,extension)
     tag = '<z_offsets type="string">'
     z_off = [np.array(ln.split(tag)[-1].split('<')[0].split(':')).astype(float) 
-     for ln in open(file_sig.replace(extension,'.xml'),'r') if tag in ln][0]
+     for ln in open(xml,'r') if tag in ln][0]
     return z_off[2]
 def get_H(fld):
     Hbase = os.path.basename(fld)
@@ -141,6 +172,13 @@ def get_final_cells_cyto(im_polyA,final_cells,icells_keep=None,ires = 4,iresf=10
     final_cells_cyto[X[keep_cyto,0],X[keep_cyto,1],X[keep_cyto,2]] = icells_neigh[neighs[keep_cyto]]
     final_cells_cyto = resize(final_cells_cyto,im_polyA.shape)
     return final_cells_cyto
+def expand_segmentation(imseg_,size=11,resc=5):
+    from scipy import ndimage as ndim
+    A = imseg_[::resc,::resc,::resc]
+    B = ndim.maximum_filter(A,size=size)
+    B[A != 0] = A[A != 0]
+    B = resize(B,imseg_.shape)
+    return B
 def slice_pair_to_info(pair):
     sl1,sl2 = pair
     xm,ym,sx,sy = sl2.start,sl1.start,sl2.stop-sl2.start,sl1.stop-sl1.start
@@ -238,7 +276,7 @@ def converge(cells1,cells2):
         return imlab1,imlab2
     return imlab1,imlab2_
 
-def standard_segmentation(im_dapi,sz_m=2,sz_M=100,rescz=4,resc=2,sz_min_2d=150,use_gpu=True):
+def standard_segmentation(im_dapi,sz_m=2,sz_M=100,rescz=4,resc=2,sz_min_2d=150,use_gpu=True,th_prob=-20,th_flow=10):
     """Using cellpose with nuclei mode"""
     from cellpose import models, io
     model = models.Cellpose(gpu=use_gpu, model_type='nuclei')
@@ -254,9 +292,10 @@ def standard_segmentation(im_dapi,sz_m=2,sz_M=100,rescz=4,resc=2,sz_min_2d=150,u
         im_ = im.astype(np.float32)
         img = (cv2.blur(im,(sz_m,sz_m))/cv2.blur(im,(sz_M,sz_M)))[::resc,::resc]
         p1,p99 = np.percentile(img,1),np.percentile(img,99.9)
+        print("im limits:",p1,p99)
         img = np.array(np.clip((img-p1)/(p99-p1),0,1),dtype=np.float32)
         masks, flows, styles, diams = model.eval(img, diameter=20, channels=chan,
-                                             flow_threshold=10,cellprob_threshold=-20,min_size=50,normalize=False)
+                                             flow_threshold=th_flow,cellprob_threshold=th_prob,min_size=50,normalize=False)
         masks_all.append(utils.fill_holes_and_remove_small_masks(masks,min_size=sz_min_2d))
         flows_all.append(flows[0])
     masks_all = np.array(masks_all)
@@ -639,6 +678,7 @@ class chromatin_analyzer():
         
     def set_fov(self,ifl):
         self.fl = self.fls[ifl]
+        get_metadata(self)
         print("Setting file: "+self.fl)
     def compute_flat_fields(self,fls=None,nend=None,ncol=None):
         if fls is None: fls = self.fls
@@ -670,7 +710,7 @@ class chromatin_analyzer():
         fig = plt.figure(figsize=(20,20))
         plt.imshow(imgout)
         fig.savefig(self.save_seg_fl.replace('.npz','__segim'+str(fr)+'.png'))
-    def compute_cell_segmentation(self,nstart=1,nend=60,rescz=6,resc=2,sz_min_2d=150,force=False,check_3Dseg=False,use_gpu=True):
+    def compute_cell_segmentation(self,nstart=1,nend=60,rescz=6,resc=2,sz_min_2d=150,th_prob=-20,th_flow=10,force=False,check_3Dseg=False,use_gpu=True,expand=11):
         self.prev_fl_dapi = getattr(self,'prev_fl_dapi','None')
         if self.prev_fl_dapi!=self.fl:
             
@@ -698,12 +738,13 @@ class chromatin_analyzer():
                 np.save(save_seg_fl_add,self.fl)
                 ###-------load dapi flat field
                 im_med_dapi = self.im_meds[-1]#np.load(save_folder+r'\median_col'+str(ncol-1)+'.npy')
+                
                 ###-------load dapi
                 
                 im_dapi = np.array([norm_im_med(get_frame(fl_final,ifr*ncol-1),im_med_dapi) for ifr in range(nstart,nend,rescz)])
                 
                 ###-------apply segmentation
-                imseg = standard_segmentation(im_dapi,rescz=1,resc=resc,sz_min_2d=sz_min_2d,use_gpu=use_gpu)
+                imseg = standard_segmentation(im_dapi,rescz=1,resc=resc,sz_min_2d=sz_min_2d,use_gpu=use_gpu,th_prob=th_prob,th_flow=th_flow)
                 #np.save(save_seg_fl,imseg)
                 np.savez_compressed(save_seg_fl,imseg)
                 #self.save_image_dapi_segmentation()
@@ -726,8 +767,12 @@ class chromatin_analyzer():
 
             
             self.imseg_ = resize(imseg,self.shape)
-            self.outpix = utils.outlines_list(self.imseg_[len(self.imseg_)//2])
+            
             self.save_image_dapi_segmentation()
+            if expand!=0:
+                self.imseg_ = expand_segmentation(self.imseg_,size=expand,resc=5)
+            self.outpix = utils.outlines_list(self.imseg_[len(self.imseg_)//2])
+            
     def load_background_image(self,rescz=1):
         self.prev_fl = getattr(self,'prev_fl','None')
         if self.prev_fl!=self.fl:

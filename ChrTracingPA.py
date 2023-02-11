@@ -219,12 +219,13 @@ def get_fov(fl):
         
 def get_hybe(fl):
     try:
-        return int(os.path.basename(fl).split('--')[1].split('R')[0][1:])
+        return int(os.path.basename(fl).split('--')[1].split('R')[0].split('_')[0][1:])
     except:
         return -1
 def get_last_readout(fl):
     try:
-        return int(os.path.basename(fl).split('--')[1].split('_')[1])
+        #return int(os.path.basename(fl).split('--')[1].split('_')[1].split(',')[-1])
+        return int(os.path.basename(fl).split('--')[1].split('R')[1].split('_')[0].split(',')[0])
     except:
         return -1
 def unique_fl_set(fl_set):
