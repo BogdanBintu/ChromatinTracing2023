@@ -7,7 +7,276 @@ import tifffile
 from tqdm.notebook import tqdm
 import pickle
 from scipy.spatial.distance import cdist
+from scipy.spatial import KDTree
+def make_trace_unique(XT,RT,hT,th_gd=100):
+    from scipy.spatial.distance import cdist
+    d = cdist(XT,XT)
+    gd = cdist(RT[:,np.newaxis],RT[:,np.newaxis])
+    W = w(d,gd)
+    W[gd==0]=np.nan
+    W[gd>th_gd]=np.nan
+    WT = np.nanmean(W,axis=-1)## this is the average weight considering the nodes with genomic distance <th_gd
+    uRs = np.unique(RT)
+    WT[np.isnan(WT)]=0
+    inds = [np.where(RT==R_)[0][np.argmax(WT[RT==R_])] for R_ in uRs]
+    return XT[inds],RT[inds],hT[inds]
+def plot_trace(X,XT,RT,hT,size_pt = 0.25,min_sz=0,viewer=None,name=None):
+    import napari
+    from matplotlib import cm as cmap
+    size=hT*size_pt+min_sz
+    addbase = False
+    if viewer is None:
+        addbase = True
+        viewer = napari.Viewer()
+    cols = cmap.rainbow(RT/np.max(RT))
+    txt = list((RT-3).astype(str))
+    text = {
+        'string': txt,
+        'size': 10,
+        'color': 'white'}
+    if addbase:
+        viewer.add_points(X*[0.5,1,1],size=0.05,face_color=[1,1,1],edge_color=[0,0,0,0],edge_width=0)#,text=text)
+    viewer.add_points(XT*[0.5,1,1],size=size,face_color=cols,edge_color=[0,0,0,0],edge_width=0,name=name)#,text=text)
+    return viewer
 
+def get_weight(X,XT,R,RT,th_gd=20):
+    from scipy.spatial.distance import cdist
+    d = cdist(X,XT)
+    gd = cdist(R[:,np.newaxis],RT[:,np.newaxis])
+    W = w(d,gd)
+    W[gd==0]=np.nan
+    W[gd>th_gd]=np.nan
+    WT = np.nanmean(W,axis=-1)## this is the average weight considering the nodes with genomic distance <th_gd
+    return WT
+def get_fisher(SC_calc,SC):
+    SC_ = np.sort(SC)[:,np.newaxis]
+    _,ipts = KDTree(SC_).query(SC_calc[:,np.newaxis])
+    return np.log(ipts+1)-np.log(len(SC_))
+def refine_trace(X,R,h,XT,RT,hT,th_gd=100,per_keep=5,use_brightness=False):
+    WT = get_weight(XT,XT,RT,RT,th_gd=th_gd)
+    W = get_weight(X,XT,R,RT,th_gd=th_gd)
+    if use_brightness:
+        SC = get_fisher(W,WT)+get_fisher(h,hT)
+        SCT = get_fisher(WT,WT)+get_fisher(hT,hT)
+    else:
+        SC = W
+        SCT = WT
+    min_ = np.percentile(SCT,per_keep)
+    uRs = np.unique(R)
+    inds = []
+    for R_ in uRs:
+        ind_ = np.where(R==R_)[0]
+        SC_ = SC[ind_]
+        SC_[np.isnan(SC_)]=-np.inf
+        imax_ = np.argmax(SC_)
+        if SC_[imax_]>min_:
+            inds.append(ind_[imax_])
+    return X[inds],R[inds],h[inds]
+def w(x,gd=1,s1=0.085,normed=True): 
+    sigmasq = 0.025**2
+    k = (s1*s1-2*sigmasq)/1
+    ssq = 2*sigmasq+k*gd
+    xsq = x*x
+    w_= 4*np.pi*xsq/(2*np.pi*ssq)**(3/2)*np.exp(-xsq/2/ssq)
+    return w_
+def get_rough_traces(Xs_D,Rs_,hs_,cells_,icell=0,dth=1.25,th_fr = 0.4,gdmax=20000):
+    
+    X = Xs_D[cells_==icell]
+    R = Rs_[cells_==icell]
+    h = hs_[cells_==icell]
+    #napari.view_points(X,size=0.1)
+    tree = KDTree(X)
+    res = tree.query_ball_tree(tree,dth)
+    Ws = []
+    edges = []
+    for iR,rs in enumerate(res):
+        edges_ = np.array([(iR,r_) for r_ in rs])
+        d = np.linalg.norm(X[rs]-X[iR],axis=-1)
+        gd = np.abs(R[rs]-R[iR])
+        keep = (gd>=1)&(gd<=gdmax)
+        Ws.extend(w(d,gd)[keep])
+        edges.extend(edges_[keep])
+    Ws = np.array(Ws)
+    edges= np.array(edges)
+
+
+    neighbours = {iX:[iX] for iX in range(len(X))}
+    order = np.argsort(Ws)[::-1]
+    for iX1,iX2 in tqdm(edges[order]):
+        neigh_ = neighbours[iX1]+ neighbours[iX2]
+        iRs_,cts_ = np.unique([R[iX] for iX in neigh_],return_counts=True)
+        if np.percentile(cts_,50)==1:
+            for iX in neigh_:
+                neighbours[iX]=neigh_
+
+    traces = {}            
+    max_trace=0
+    for iR in neighbours:
+        if iR not in traces:
+            max_trace+=1
+            traces[iR]=max_trace
+        for iRR in neighbours[iR]:
+            traces[iRR]=traces[iR]
+
+
+    trcs = np.array([traces[iX] for iX in range(len(traces))])
+    utrcs,cts_ = np.unique(trcs,return_counts=True)
+    utrcs = utrcs[np.argsort(cts_)[::-1]]
+    uRs = np.unique(Rs_)
+    frs = np.array([len(np.unique(R[trcs==utr]))/len(uRs) for utr in utrcs])
+    
+    
+    
+    plt.plot(frs,'o-')
+    plt.plot([0, len(frs)],[th_fr,th_fr],'k-')
+    plt.xlabel('Traces')
+    plt.ylabel("Detection efficiecy")
+    keep = frs>th_fr
+    keep_tr = utrcs[keep]
+    print("Detection efficiency:",np.median(frs[keep]))
+    print("Detected traces:",np.sum(keep))
+    return trcs,keep_tr
+def get_points_cell(self,icell_=0,bad_points=50,std_th=0.15,pix = [0.25,0.10833,0.10833]):
+    #self = chr_
+    dic_drifts,dic_pts_cells = self.dic_drifts,self.dic_pts_cells
+    fls_fov = self.fls_fov  
+    #if volume_th is not None:
+    self.cells =  get_cells(dic_pts_cells,volume_th =0)
+    cells = self.cells 
+    icell = cells[icell_]
+    Xs,hs,Rs,icols = get_X(dic_drifts,dic_pts_cells,fls_fov,icell,pix=pix,nelems = 10000)
+
+
+    ### Get the average maximum brightness per color
+    dic_h = {}
+    for icol in np.unique(icols):
+        keep = (icols==icol)
+        Rkeep = np.unique(Rs[keep])
+        dic_h[icol] = np.median([np.max(hs[Rs==R,0])for R in Rkeep])
+    dic_Rcol = {R:icol for R,icol in zip(Rs,icols)}
+    self.dic_Rcol = dic_Rcol
+    ### normalize brigtheses
+    hsnorm = hs[:,0].copy()
+    bknorm = hs[:,1].copy()
+    is_good = []
+    for iR in np.unique(Rs):
+
+        hsnorm[Rs==iR] = hsnorm[Rs==iR]/dic_h[dic_Rcol[iR]]
+        bknorm[Rs==iR] = bknorm[Rs==iR]/dic_h[dic_Rcol[iR]]
+        hs_ = hsnorm[Rs==iR]
+        min_ = np.median(np.sort(hs_)[:bad_points])
+        #std_ = np.std(np.sort(hs_)[:50])*20
+        std_ = std_th
+        keep = hs_>(min_+std_)
+        is_good.extend(keep)
+
+    ### find minimum
+    #min_ = np.median([h_ for iR in np.unique(Rs) for h_ in np.sort(hsnorm[Rs==iR])[:50]])
+    is_good = np.array(is_good)
+    hsnorm_ = np.clip(hsnorm-min_,0,1)
+
+
+    Xs_ = Xs[is_good]
+    Rs_ = Rs[is_good]
+    hs_ = hsnorm[is_good]
+    iRs = np.unique(Rs_)
+    return Xs,Rs,hsnorm,Xs_,Rs_,hs_
+    
+def compute_hybe_drift(Xs_CC,Hybe_,ncompare = 20,th_dist=0.5,npoint=10):
+    """
+    Given points Xs_CC and indexes Hybe_ this compares points in hybe and hybe+i (with all i<ncompare) and 
+    based on the nearest neighbors < th_dist will computed the consensus drift.
+    Apply as:
+    icols_ = (Rs_-1)%3
+    Hybe_ = (Rs_-1)//3
+    drift_hybe = compute_hybe_drift(Xs_CC,Hybe_,ncompare = 20)
+    Xs_D = Xs_CC.copy()
+    Xs_D-= np.array([drift_hybe[hybe] for hybe in Hybe_])
+    """
+    Hybes = np.unique(Hybe_)
+    nH = len(Hybes)
+    #for i in range(len())
+    a = [np.zeros(nH)]
+    a[0][nH//2]=1
+    b = [[0,0,0]]
+    count=1
+    for iH in range(nH):
+        for jH in range(iH):
+            if np.abs(iH-jH)<=ncompare:
+                X1 = Xs_CC[Hybe_==iH]#[1::2]
+                X2 = Xs_CC[Hybe_==jH]#[1::2]
+
+                tree = KDTree(X1)
+                dists,inds = tree.query(X2)
+                keep = dists<th_dist
+                X1_= X1[inds[keep]]
+                X2_= X2[keep]
+
+
+                if len(X1_)>npoint:
+                    b_ = np.median((X1_-X2_),axis=0)
+                    b.append(b_)
+                    arow = np.zeros(nH)
+                    arow[iH],arow[jH]=1,-1
+                    a.append(arow)
+                    count+=1
+    a=np.array(a)
+    b=np.array(b)
+    res = np.linalg.lstsq(a,b)[0]
+    drift_hybe = {hybe:res[iH]for iH,hybe in enumerate(Hybes)}
+    return drift_hybe
+def get_NN_distances(Xs_,Rs_,deltaR=1,th_dist=1):
+    """
+    Given a set of points <Xs_> and indixes of rounds <Rs_> this returns the distances of nearest neighbors from R and R+deltaR.
+    It only keeps distances smaller than th_dist.
+    """
+    
+    all_dists = []
+    iRs = np.unique(Rs_)
+    for iR in iRs[:]:
+        iR1,iR2=iR,iR+deltaR
+        X1 = Xs_[Rs_==iR1]
+        X2 = Xs_[Rs_==iR2]
+        #if dic_Rcol.get(iR,0)==dic_Rcol.get(iR+1,0):
+        if True:#((iR1-1)//3)==((iR2-1)//3):
+            tree = KDTree(X1)
+            dists,inds = tree.query(X2)
+            all_dists.extend(dists[dists<th_dist])
+    return all_dists
+def compute_color_drift_per_cell(Xs_,Rs_,cells_,dic_Rcol,th_dist=0.5):
+    """
+    For each cell this looks for nearest neighbours across consecutive genomic regions
+    It saves a dictionary dic_col_drift[(cell,color)] with the drift that needs to be added to the positions.
+    Apply as:
+    
+    Xs_CC = Xs_.copy()
+    XDC = np.array([dic_col_drift[(cell,dic_Rcol[iR])]for cell,iR in zip(cells_,Rs_)])
+    Xs_CC+=XDC
+    
+    """
+    dic_col_drift = {}
+    for cell in np.unique(cells_):
+        dic_pair = {}
+        keep = cells_==cell
+        Xs_T = Xs_[keep]
+        Rs_T = Rs_[keep]
+        for iR in np.unique(Rs_T):
+            X1 = Xs_T[Rs_T==iR]
+            X2 = Xs_T[Rs_T==(iR+1)]
+            key = (dic_Rcol.get(iR,0),dic_Rcol.get(iR+1,0))
+            tree = KDTree(X1)
+            dists,inds = tree.query(X2)
+            keep = dists<th_dist
+            X1_= X1[inds[keep]]
+            X2_= X2[keep]
+            if key not in dic_pair: dic_pair[key]=[]
+            dic_pair[key] += [np.median(X1_-X2_,axis=0)]
+
+        dic_col_drift[(cell,0)]=np.array([0,0,0])
+        dic_col_drift[(cell,1)]=np.nanmedian(dic_pair[(0,1)],axis=0)
+        dic_col_drift[(cell,2)]=np.nanmedian(dic_pair[(0,1)],axis=0)+np.nanmedian(dic_pair[(1,2)],axis=0)
+        #dic_col_drift,-np.nanmedian(dic_pair[(2,0)],axis=0)
+    return dic_col_drift
 def get_X(dic_drifts,dic_pts_cells,fls_fov,icell,pix=[0.200,0.1083,0.1083],nelems = 4,dic_zdist=None):
     ncol = len(dic_pts_cells[0])
     Xs,Rs,hs,icols = [],[],[],[]
