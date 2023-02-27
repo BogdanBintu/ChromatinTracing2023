@@ -8,6 +8,7 @@ import tifffile
 
 sys.path.append(r'C:\Users\bbintu\bbintu_jackfruit_scripts\XK_ChromatinTracing\CommonTools')
 sys.path.append(r'C:\Users\BintuLabUser\Scope3AnalysisScripts\ChromatinTracing2023\CommonTools')
+sys.path.append(r'C:\Users\Bogdan\Dropbox\ChromatinTracing2023\CommonTools')
 import AlignmentTools_py3 as at
 import Fitting_v4 as ft
 

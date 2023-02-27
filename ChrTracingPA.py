@@ -39,39 +39,151 @@ def plot_trace(X,XT,RT,hT,size_pt = 0.25,min_sz=0,viewer=None,name=None):
     viewer.add_points(XT*[0.5,1,1],size=size,face_color=cols,edge_color=[0,0,0,0],edge_width=0,name=name)#,text=text)
     return viewer
 
-def get_weight(X,XT,R,RT,th_gd=20):
+
+
+    
+    
+def get_trace(X,R,h,seed=None,visited_iX=None,traces =[],ddist = 0.75,dgen=20,plt_val=False,exclude=True,tqdm_=None):
+
+    if visited_iX is None:
+        visited_iX = np.unique([iX for tr in traces for iX in tr])
+    
+    keepf = np.setdiff1d(np.arange(len(X)),visited_iX)
+
+    iXtemp = [np.argmax(h[keepf])]    
+    if not exclude:
+        iXtemp = [keepf[np.argmax(h[keepf])]]
+        keepf = np.arange(len(X))
+    if seed is not None:
+        iXtemp = list(seed)
+    
+    iXtemp0 = list(iXtemp)
+    X_ = X[keepf]
+    R_ = R[keepf]
+    tree = KDTree(X_)
+    Xtemp = X_[iXtemp]
+    Rtemp = R_[iXtemp]
+    while True:
+        res = tree.query_ball_point(Xtemp,ddist)
+        iXs = np.unique([r for rs in res for r in rs]+iXtemp)
+        
+        Wd = get_weight(X_[iXs],Xtemp,R_[iXs],Rtemp,th_gd=dgen)
+        good= ~np.isnan(Wd)
+        iXs = iXs[good]
+        Rcand = R_[iXs]
+        Wd = Wd[good]
+        dic_best={R_[iXtemp0[0]]:[iXtemp0[0],np.inf]}
+        for iX__,R__,W__ in zip(iXs,Rcand,Wd):
+            if R__ not in dic_best: 
+                dic_best[R__]=[iX__,W__]
+            else: 
+                #if dic_best[R__][0]!=iXtemp0[0]:
+                if W__>dic_best[R__][-1]: 
+                    dic_best[R__]=[iX__,W__]
+        iX_keep = [dic_best[R__][0] for R__ in dic_best]
+        iXtemp_prev = np.unique(iXtemp)
+        
+        if len(iXtemp_prev)==len(iX_keep):
+            break
+        iXtemp = list(iX_keep)
+        Xtemp = X_[iXtemp]
+        Rtemp = R_[iXtemp]
+        #print(len(iXtemp))
+    
+    trace = keepf[iXtemp]
+    if tqdm_ is not None:
+        tqdm_.update(len(visited_iX)-tqdm_.n)
+    if plt_val:
+        plt.figure()
+        plt.plot(X[:,1],X[:,2],'o',alpha=0.01)
+        plt.plot(X[trace,1],Xtemp[trace,2],'o',alpha=0.1)
+        plt.axis('equal')
+        plt.show()
+    return trace
+
+def get_initial_traces(X,R,h,ddist=0.5,dgen=50):
+    tqdm_ = tqdm(total=len(X))
+    traces = []
+    while True:
+        trace = get_trace(X,R,h,traces=traces,ddist = ddist,dgen=dgen,plt_val=False,
+                          exclude=True,tqdm_=tqdm_)
+        traces+=[trace]
+        used_iX = np.unique([iX for tr in traces for iX in tr])
+
+        if len(used_iX)==len(X):
+            break
+    return traces
+def enforce_unique(keep_traces_,X,R,th_dg=50):
+    """Given a list of traces (index in X/R) and the points X and genomic indexes R 
+    this ensures that each point is only in one trace"""
+    uiX = np.unique([iX for tr in keep_traces_ for iX in tr])
+    isInTrace = np.array([np.in1d(uiX,tr) for tr in keep_traces_])
+    badiX = np.where(np.sum(isInTrace,0)>1)[0]
+    #print(len(badiX))
+    deg_traces = [np.where(isInTrace[:,iX_])[0] for iX_ in badiX]
+    iXbad = uiX[badiX]
+    keep_traces__ = [np.array(tr) for tr in keep_traces_]
+    for iX,itrs in zip(iXbad,deg_traces):
+        scores = np.array([get_weight(X[[iX]],X[keep_traces__[itr]],R[[iX]],R[keep_traces__[itr]],th_gd=th_dg)[0] for itr in itrs])
+        scores[np.isnan(scores)]=-np.inf
+        btr = np.argmax(scores)
+        for itr in itrs:
+            if itr!=itrs[btr]:
+                keep_traces__[itr] = np.setdiff1d(keep_traces__[itr],[iX])
+    return keep_traces__    
+def get_fisher(SC_calc,SC,exclude_inf=True):
+    if exclude_inf:
+        SC_ = np.sort(SC[~(np.isinf(SC)|np.isnan(SC))])[:,np.newaxis]
+    else:
+        SC_ = np.sort(SC[~np.isnan(SC)])[:,np.newaxis]
+    if len(SC_)==0:
+        return -np.inf
+    _,ipts = KDTree(SC_).query(SC_calc[:,np.newaxis])
+    return np.log(ipts+1)-np.log(len(SC_))
+def get_weight(X,XT,R,RT,th_gd=20,dth = 1,return_good=False):
     from scipy.spatial.distance import cdist
     d = cdist(X,XT)
+    
     gd = cdist(R[:,np.newaxis],RT[:,np.newaxis])
     W = w(d,gd)
     W[gd==0]=np.nan
     W[gd>th_gd]=np.nan
     WT = np.nanmean(W,axis=-1)## this is the average weight considering the nodes with genomic distance <th_gd
+    is_good = np.any((d<dth)&(gd<th_gd)&(gd>0),axis=-1)
+    if return_good:
+        return WT,is_good
     return WT
-def get_fisher(SC_calc,SC):
-    SC_ = np.sort(SC)[:,np.newaxis]
-    _,ipts = KDTree(SC_).query(SC_calc[:,np.newaxis])
-    return np.log(ipts+1)-np.log(len(SC_))
-def refine_trace(X,R,h,XT,RT,hT,th_gd=100,per_keep=5,use_brightness=False):
-    WT = get_weight(XT,XT,RT,RT,th_gd=th_gd)
-    W = get_weight(X,XT,R,RT,th_gd=th_gd)
+def refine_trace(X,R,h,XT,RT,hT,th_gd=100,per_keep=5,dth = 0.3,WThT=None,use_brightness=False):
+    WT = get_weight(XT,XT,RT,RT,th_gd=th_gd,dth = dth)
+    W,is_good = get_weight(X,XT,R,RT,th_gd=th_gd,dth = dth,return_good=True)
     if use_brightness:
-        SC = get_fisher(W,WT)+get_fisher(h,hT)
-        SCT = get_fisher(WT,WT)+get_fisher(hT,hT)
+        if WThT is None:
+            WThT = WT,hT
+        WTs,hTs = WThT
+        SC = np.array([get_fisher(W,WTs),get_fisher(h,hTs)]).T
+        SCT = np.array([get_fisher(WT,WTs),get_fisher(hT,hTs)]).T#get_fisher(WT,WT)+get_fisher(hT,hT)
+        SCTs = np.array([get_fisher(WTs,WTs),get_fisher(hTs,hTs)]).T
     else:
-        SC = W
-        SCT = WT
-    min_ = np.percentile(SCT,per_keep)
+        if WThT is None:
+            WThT = WT
+        WTs = WThT
+        SC = W[:,np.newaxis]
+        SCT = WT[:,np.newaxis]
+        SCTs = WTs[:,np.newaxis]
+    min_ = np.percentile(SCTs,per_keep,axis=0)
     uRs = np.unique(R)
     inds = []
     for R_ in uRs:
         ind_ = np.where(R==R_)[0]
         SC_ = SC[ind_]
+        is_good_ = is_good[ind_]
         SC_[np.isnan(SC_)]=-np.inf
-        imax_ = np.argmax(SC_)
-        if SC_[imax_]>min_:
+        SC_[~is_good_]=-np.inf
+        imax_ = np.argmax(np.sum(SC_,axis=-1))
+        if np.all(SC_[imax_]>min_) and is_good_[imax_]:
             inds.append(ind_[imax_])
-    return X[inds],R[inds],h[inds]
+
+    return X[inds],R[inds],h[inds],WThT
 def w(x,gd=1,s1=0.085,normed=True): 
     sigmasq = 0.025**2
     k = (s1*s1-2*sigmasq)/1
