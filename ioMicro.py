@@ -76,7 +76,19 @@ def example_rerun():
                      cts_all_pm = dec.cts_all_pm,cts_all = dec.cts_all,
                      gns_names=dec.gns_names,cm_cells=dec.cm_cells,vols=dec.vols)
 
-
+def htag_to_Rs(tag):
+    Rs = []
+    start=False
+    for let in tag.replace('R_','R'):
+        if let=='R':
+            Rs.append('R')
+            start=True
+        else: 
+            if let.isnumeric() and start:
+                Rs[-1]+=let
+            else:
+                start=False
+    return Rs
 #import napari
 import numpy as np,pickle,glob,os
 import cv2
@@ -84,7 +96,14 @@ from scipy.signal import convolve,fftconvolve
 from tqdm import tqdm
 import matplotlib.pylab as plt
 from scipy.spatial import cKDTree
-
+def get_iH(fld):
+    str__ = ''
+    for str_ in os.path.basename(fld)[1:]:
+        if str_.isnumeric():
+            str__+=str_
+        else:
+            break
+    return int(str__)
 def get_p99(fl_dapi,resc=4):
     im = read_im(fl_dapi)
     im_ = np.array(im[-1][im.shape[1]//2],dtype=np.float32)
